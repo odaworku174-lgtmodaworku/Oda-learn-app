@@ -38,6 +38,7 @@ import {
   type OfflineVideoRecord,
   type PrecacheStats,
 } from './lib/offlineCache';
+import { DEFAULT_CURRICULUM } from './lib/defaultCurriculum';
 import type { GradeItem, SiteSettings, UserProfile } from './types';
 
 type ActiveRoute =
@@ -63,10 +64,13 @@ export default function App() {
   const cachedCurriculum = loadCurriculumCache();
   const cachedUser = loadUserCache();
 
-  const [settings, setSettings] = useState<SiteSettings | null>(
-    cachedCurriculum?.settings || null
-  );
-  const [grades, setGrades] = useState<GradeItem[]>(cachedCurriculum?.grades || []);
+  const initialCurriculum =
+    cachedCurriculum?.settings?.heroTitle && Array.isArray(cachedCurriculum?.grades)
+      ? cachedCurriculum
+      : DEFAULT_CURRICULUM;
+
+  const [settings, setSettings] = useState<SiteSettings | null>(initialCurriculum.settings);
+  const [grades, setGrades] = useState<GradeItem[]>(initialCurriculum.grades);
   const [user, setUser] = useState<UserProfile | null>(cachedUser);
   const [localProgress, setLocalProgress] = useState<string[]>(() => {
     try {
@@ -76,8 +80,8 @@ export default function App() {
       return [];
     }
   });
-  const [loading, setLoading] = useState(!cachedCurriculum);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError] = useState<string | null>(null);
 
   const [route, setRoute] = useState<ActiveRoute>({ view: 'home' });
   const [showSplash, setShowSplash] = useState(
@@ -123,19 +127,34 @@ export default function App() {
     let active = true;
     refreshOfflineList();
 
-    if (cachedCurriculum) {
-      getImagePrecacheStats(cachedCurriculum).then((stats) => {
-        if (active) setPrecacheStats(stats);
-      });
-    }
+    getImagePrecacheStats(initialCurriculum).then((stats) => {
+      if (active) setPrecacheStats(stats);
+    });
 
     if (navigator.onLine) {
-      Promise.all([fetchCurriculum(), getCurrentUser()])
+      Promise.all([
+        fetchCurriculum().catch(() => null),
+        getCurrentUser().catch(() => null),
+      ])
         .then(async ([curriculum, currentUser]) => {
           if (!active) return;
-          setSettings(curriculum.settings);
-          setGrades(curriculum.grades);
-          saveCurriculumCache(curriculum);
+          if (curriculum) {
+            setSettings(curriculum.settings);
+            setGrades(curriculum.grades);
+            saveCurriculumCache(curriculum);
+
+            if (!cachedCurriculum && curriculum.settings.showOpeningSplash) {
+              setShowSplash(true);
+            }
+
+            precacheCurriculumImages(curriculum, (stats) => {
+              if (active) setPrecacheStats(stats);
+            });
+          } else {
+            precacheCurriculumImages(initialCurriculum, (stats) => {
+              if (active) setPrecacheStats(stats);
+            });
+          }
 
           if (currentUser) {
             setUser(currentUser);
@@ -152,36 +171,14 @@ export default function App() {
                 // Keep local progress
               }
             }
-          } else {
-            setUser(null);
-            saveUserCache(null);
-          }
-
-          if (!cachedCurriculum && curriculum.settings.showOpeningSplash) {
-            setShowSplash(true);
-          }
-
-          // Proactively cache all 16:9 landscape images in the background for offline use
-          precacheCurriculumImages(curriculum, (stats) => {
-            if (active) setPrecacheStats(stats);
-          });
-        })
-        .catch((err) => {
-          if (!active) return;
-          if (!cachedCurriculum) {
-            setLoadError(
-              err instanceof Error ? err.message : 'Unable to load Oda Learn curriculum.'
-            );
           }
         })
+        .catch(() => {})
         .finally(() => {
           if (active) setLoading(false);
         });
     } else {
       setLoading(false);
-      if (!cachedCurriculum) {
-        setLoadError('You are offline and no curriculum has been cached yet.');
-      }
     }
 
     return () => {

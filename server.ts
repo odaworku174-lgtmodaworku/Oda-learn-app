@@ -5,7 +5,6 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import fs from 'fs';
 import http from 'http';
 import path from 'path';
-import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import type {
   ChapterItem,
@@ -24,9 +23,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const DATA_DIR = path.join(__dirname, 'data');
+const BUNDLED_DATA_FILE = path.join(__dirname, 'data', 'oda-learn.json');
+const BUNDLED_UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+function resolveWritableBaseDir(): string {
+  if (process.env.VERCEL) {
+    return '/tmp/oda-learn';
+  }
+  try {
+    fs.accessSync(__dirname, fs.constants.W_OK);
+    return __dirname;
+  } catch {
+    return '/tmp/oda-learn';
+  }
+}
+
+const WRITABLE_BASE_DIR = resolveWritableBaseDir();
+const DATA_DIR = path.join(WRITABLE_BASE_DIR, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'oda-learn.json');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const UPLOADS_DIR = path.join(WRITABLE_BASE_DIR, 'uploads');
 const AUTH_SECRET = process.env.SESSION_SECRET || 'oda-learn-local-session-secret-2026';
 const DEFAULT_ADMIN_EMAIL = 'odaworku174@gmail.com';
 const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'oda-admin-2026';
@@ -495,9 +510,18 @@ function makeInitialSeed(): DatabaseSchema {
 
 function readDB(): DatabaseSchema {
   if (!fs.existsSync(DATA_FILE)) {
-    const seed = makeInitialSeed();
-    fs.writeFileSync(DATA_FILE, JSON.stringify(seed, null, 2), 'utf8');
-    return seed;
+    if (BUNDLED_DATA_FILE !== DATA_FILE && fs.existsSync(BUNDLED_DATA_FILE)) {
+      try {
+        fs.copyFileSync(BUNDLED_DATA_FILE, DATA_FILE);
+      } catch {
+        // Fall through to seed
+      }
+    }
+    if (!fs.existsSync(DATA_FILE)) {
+      const seed = makeInitialSeed();
+      fs.writeFileSync(DATA_FILE, JSON.stringify(seed, null, 2), 'utf8');
+      return seed;
+    }
   }
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
@@ -648,6 +672,7 @@ function compressVideoFile(inputPath: string, outputPath: string): Promise<strin
 async function optimizeImageFile(filePath: string): Promise<number> {
   const tmpPath = `${filePath}.opt.jpg`;
   try {
+    const { default: sharp } = await import('sharp');
     await sharp(filePath)
       .rotate()
       .resize({ width: 1280, withoutEnlargement: true })
@@ -670,11 +695,13 @@ async function optimizeImageFile(filePath: string): Promise<number> {
   }
 }
 
-async function startServer() {
+export async function createExpressApp(httpServer?: http.Server) {
   const app = express();
-  const httpServer = http.createServer(app);
 
   app.use('/uploads', express.static(UPLOADS_DIR, { acceptRanges: true }));
+  if (BUNDLED_UPLOADS_DIR !== UPLOADS_DIR && fs.existsSync(BUNDLED_UPLOADS_DIR)) {
+    app.use('/uploads', express.static(BUNDLED_UPLOADS_DIR, { acceptRanges: true }));
+  }
   app.use('/images', express.static(path.join(__dirname, 'public', 'images')));
 
   app.use('/api', (req, res, next) => {
@@ -1265,10 +1292,11 @@ async function startServer() {
 
   const distDir = path.join(__dirname, 'dist');
   const isProduction =
+    Boolean(process.env.VERCEL) ||
     process.env.NODE_ENV === 'production' ||
     (process.env.npm_lifecycle_event === 'start' && fs.existsSync(path.join(distDir, 'index.html')));
 
-  if (!isProduction) {
+  if (!isProduction && httpServer) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
@@ -1280,19 +1308,29 @@ async function startServer() {
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (fs.existsSync(path.join(distDir, 'index.html'))) {
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 
+  return app;
+}
+
+async function startServer() {
+  const httpServer = http.createServer();
+  const app = await createExpressApp(httpServer);
+  httpServer.on('request', app);
+
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Oda Learn server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start Oda Learn server:', err);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error('Failed to start Oda Learn server:', err);
+    process.exit(1);
+  });
+}
