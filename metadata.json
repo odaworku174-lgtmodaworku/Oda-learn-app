@@ -1,0 +1,6 @@
+{
+  "name": "Oda Learn",
+  "description": "Oda Learn — Installable tutorial platform for Grade 9–12 and Freshman Program video lessons with landscape curriculum navigation and gallery media studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
