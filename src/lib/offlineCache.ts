@@ -141,49 +141,53 @@ export async function precacheCurriculumImages(
     return getImagePrecacheStats(data);
   }
 
-  const cache = await caches.open(MEDIA_CACHE_NAME);
-  let cachedCount = 0;
-  const toFetch: string[] = [];
+  try {
+    const cache = await caches.open(MEDIA_CACHE_NAME);
+    let cachedCount = 0;
+    const toFetch: string[] = [];
 
-  for (const url of urls) {
-    const existing = await cache.match(url);
-    if (existing) {
-      cachedCount += 1;
-    } else {
-      toFetch.push(url);
-    }
-  }
-
-  onProgress?.({ totalImages: urls.length, cachedImages: cachedCount, isSyncing: toFetch.length > 0 });
-
-  const CONCURRENCY = 4;
-  let index = 0;
-
-  const worker = async () => {
-    while (index < toFetch.length) {
-      const currentIdx = index++;
-      const url = toFetch[currentIdx];
-      try {
-        const res = await fetch(url, { mode: url.startsWith('http') ? 'cors' : 'same-origin' });
-        if (res.ok) {
-          await cache.put(url, res.clone());
-          cachedCount += 1;
-          onProgress?.({
-            totalImages: urls.length,
-            cachedImages: cachedCount,
-            isSyncing: cachedCount < urls.length,
-          });
-        }
-      } catch {
-        // Skip failed image without aborting batch
+    for (const url of urls) {
+      const existing = await cache.match(url);
+      if (existing) {
+        cachedCount += 1;
+      } else {
+        toFetch.push(url);
       }
     }
-  };
 
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toFetch.length) }, () => worker()));
-  const finalStats = { totalImages: urls.length, cachedImages: cachedCount, isSyncing: false };
-  onProgress?.(finalStats);
-  return finalStats;
+    onProgress?.({ totalImages: urls.length, cachedImages: cachedCount, isSyncing: toFetch.length > 0 });
+
+    const CONCURRENCY = 4;
+    let index = 0;
+
+    const worker = async () => {
+      while (index < toFetch.length) {
+        const currentIdx = index++;
+        const url = toFetch[currentIdx];
+        try {
+          const res = await fetch(url, { mode: url.startsWith('http') ? 'cors' : 'same-origin' });
+          if (res.ok) {
+            await cache.put(url, res.clone());
+            cachedCount += 1;
+            onProgress?.({
+              totalImages: urls.length,
+              cachedImages: cachedCount,
+              isSyncing: cachedCount < urls.length,
+            });
+          }
+        } catch {
+          // Skip failed image without aborting batch
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toFetch.length) }, () => worker()));
+    const finalStats = { totalImages: urls.length, cachedImages: cachedCount, isSyncing: false };
+    onProgress?.(finalStats);
+    return finalStats;
+  } catch {
+    return { totalImages: urls.length, cachedImages: 0, isSyncing: false };
+  }
 }
 
 /* --- IndexedDB Offline Video Storage --- */

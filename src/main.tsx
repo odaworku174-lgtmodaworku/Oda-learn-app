@@ -3,6 +3,10 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
 import './index.css';
 
-registerSW({ immediate: true });
+try {
+  registerSW({ immediate: true });
+} catch {
+  // Service worker registration may be restricted in certain contexts
+}
 
 createRoot(document.getElementById('root')!).render(<App />);
