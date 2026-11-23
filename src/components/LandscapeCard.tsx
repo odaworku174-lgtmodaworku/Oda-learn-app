@@ -1,5 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowRight, BookOpen, CheckCircle2, HardDriveDownload, Play } from 'lucide-react';
+import {
+  ArrowRight,
+  BookOpen,
+  CheckCircle2,
+  Download,
+  HardDriveDownload,
+  Loader2,
+  Play,
+  X,
+} from 'lucide-react';
+import { formatMB, formatTimeLeft, type DownloadProgressInfo } from '../lib/offlineCache';
 
 interface LandscapeCardProps {
   index: number;
@@ -14,6 +24,10 @@ interface LandscapeCardProps {
   isCompleted?: boolean;
   isSavedOffline?: boolean;
   duration?: string;
+  downloadProgress?: DownloadProgressInfo | null;
+  downloadError?: string | null;
+  onDownloadClick?: () => void;
+  onCancelDownload?: () => void;
   onClick: () => void;
 }
 
@@ -30,6 +44,10 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
   isCompleted = false,
   isSavedOffline = false,
   duration,
+  downloadProgress = null,
+  downloadError = null,
+  onDownloadClick,
+  onCancelDownload,
   onClick,
 }) => {
   const [imgFailed, setImgFailed] = useState(false);
@@ -43,7 +61,6 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
     let revokedUrl: string | null = null;
     let active = true;
 
-    // If offline or browser needs cache fallback, resolve directly from Cache API
     if (!navigator.onLine) {
       caches
         .open('oda-learn-media-v1')
@@ -84,10 +101,17 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
   const formattedIndex = String(index + 1).padStart(2, '0');
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      className="group relative block w-full overflow-hidden rounded-2xl border border-slate-200 bg-slate-900 text-left shadow-sm transition-all duration-100 hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 focus-visible:ring-offset-2"
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className="group relative block w-full cursor-pointer overflow-hidden rounded-2xl border border-slate-200 bg-slate-900 text-left shadow-sm transition-all duration-100 hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 focus-visible:ring-offset-2"
     >
       <div className="relative aspect-video w-full overflow-hidden bg-slate-900">
         {resolvedSrc && !imgFailed ? (
@@ -110,18 +134,18 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/40 to-slate-950/15" />
 
         {/* Top row inside 16:9 frame */}
-        <div className="absolute inset-x-0 top-0 flex items-center justify-between p-4 sm:p-6">
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-200">
-            <span className="font-mono tabular-nums text-amber-300">{formattedIndex}</span>
-            <span aria-hidden="true">·</span>
-            <span>{kicker}</span>
+        <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-3.5 sm:p-6">
+          <div className="flex items-center gap-2 text-xs font-medium text-slate-200 min-w-0">
+            <span className="font-mono tabular-nums text-amber-300 shrink-0">{formattedIndex}</span>
+            <span aria-hidden="true" className="shrink-0">·</span>
+            <span className="truncate">{kicker}</span>
           </div>
 
-          <div className="flex items-center gap-3 text-xs font-medium text-slate-100">
+          <div className="flex items-center gap-2.5 text-xs font-medium text-slate-100 shrink-0">
             {isVideoPart && isSavedOffline && (
-              <span className="inline-flex items-center gap-1 text-sky-300 font-semibold">
+              <span className="inline-flex items-center gap-1 rounded-lg bg-sky-950/80 border border-sky-400/30 px-2.5 py-1 text-sky-200 font-semibold backdrop-blur-sm">
                 <HardDriveDownload className="h-3.5 w-3.5" />
-                Saved Offline
+                Saved
               </span>
             )}
             {isVideoPart && duration && (
@@ -130,8 +154,22 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
             {isVideoPart && isCompleted && (
               <span className="inline-flex items-center gap-1 text-emerald-300 font-semibold">
                 <CheckCircle2 className="h-4 w-4" />
-                Completed
+                <span className="hidden sm:inline">Completed</span>
               </span>
+            )}
+            {isVideoPart && hasUploadedVideo && !isSavedOffline && onDownloadClick && !downloadProgress && (
+              <button
+                type="button"
+                aria-label={`Download ${title}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDownloadClick();
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-white/30 bg-slate-950/75 px-3 py-1.5 text-xs font-semibold text-white backdrop-blur-md hover:bg-teal-700 hover:border-teal-500 active:scale-95 transition-all min-h-[36px]"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>Download</span>
+              </button>
             )}
           </div>
         </div>
@@ -153,13 +191,71 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
 
         {/* Bottom editorial text overlay inside 16:9 landscape */}
         <div className="absolute inset-x-0 bottom-0 flex flex-col justify-end p-4 sm:p-7">
-          <h3 className="font-display text-xl font-bold tracking-tight text-white sm:text-3xl text-balance">
+          <h3 className="font-display text-lg font-bold tracking-tight text-white sm:text-3xl text-balance">
             {title}
           </h3>
           {subtitle && (
-            <p className="mt-1.5 max-w-2xl text-xs leading-relaxed text-slate-200 line-clamp-2 sm:text-sm">
+            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-200 line-clamp-2 sm:text-sm">
               {subtitle}
             </p>
+          )}
+
+          {downloadProgress && (
+            <div
+              className="mt-2.5 rounded-xl border border-white/20 bg-slate-950/85 p-2.5 backdrop-blur-md"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-white tabular-nums">
+                <span className="inline-flex items-center gap-1.5 font-sans font-semibold text-teal-300">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {downloadProgress.phase === 'preparing'
+                    ? 'Compressing...'
+                    : `${formatMB(downloadProgress.receivedBytes)}${
+                        downloadProgress.totalBytes
+                          ? ` / ${formatMB(downloadProgress.totalBytes)}`
+                          : ''
+                      }`}
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-200">
+                    {downloadProgress.phase === 'preparing'
+                      ? 'Preparing MP4...'
+                      : formatTimeLeft(downloadProgress.secondsLeft)}
+                  </span>
+                  {onCancelDownload && (
+                    <button
+                      type="button"
+                      aria-label={`Cancel download ${title}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCancelDownload();
+                      }}
+                      className="rounded-md bg-white/10 p-1 text-slate-200 hover:bg-white/20"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                <div
+                  className={`h-full transition-all duration-150 ${
+                    downloadProgress.percent === null
+                      ? 'w-1/3 animate-pulse bg-teal-400'
+                      : 'bg-teal-400'
+                  }`}
+                  style={
+                    downloadProgress.percent !== null
+                      ? { width: `${downloadProgress.percent}%` }
+                      : undefined
+                  }
+                />
+              </div>
+            </div>
+          )}
+
+          {downloadError && (
+            <p className="mt-1.5 text-xs font-medium text-red-300">{downloadError}</p>
           )}
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/15">
@@ -173,6 +269,6 @@ export const LandscapeCard: React.FC<LandscapeCardProps> = ({
           </div>
         </div>
       </div>
-    </button>
+    </div>
   );
 };

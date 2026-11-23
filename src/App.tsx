@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -28,6 +28,8 @@ import {
   togglePartProgress,
 } from './lib/api';
 import {
+  deleteOfflineVideo,
+  downloadCompressedVideoForOffline,
   getImagePrecacheStats,
   listOfflineVideos,
   loadCurriculumCache,
@@ -35,11 +37,12 @@ import {
   precacheCurriculumImages,
   saveCurriculumCache,
   saveUserCache,
+  type DownloadProgressInfo,
   type OfflineVideoRecord,
   type PrecacheStats,
 } from './lib/offlineCache';
 import { DEFAULT_CURRICULUM } from './lib/defaultCurriculum';
-import type { GradeItem, SiteSettings, UserProfile } from './types';
+import type { GradeItem, SiteSettings, UserProfile, VideoPartItem } from './types';
 
 type ActiveRoute =
   | { view: 'home' }
@@ -93,6 +96,9 @@ export default function App() {
   const [installModalOpen, setInstallModalOpen] = useState(false);
 
   const [offlineVideos, setOfflineVideos] = useState<Omit<OfflineVideoRecord, 'blob'>[]>([]);
+  const [downloadingParts, setDownloadingParts] = useState<Record<string, DownloadProgressInfo>>({});
+  const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({});
+  const downloadAbortRefs = useRef<Record<string, AbortController>>({});
   const [precacheStats, setPrecacheStats] = useState<PrecacheStats>({
     totalImages: 0,
     cachedImages: 0,
@@ -244,6 +250,66 @@ export default function App() {
     }
   };
 
+  const handleDownloadPart = useCallback(
+    async (
+      part: VideoPartItem,
+      gradeTitle: string,
+      subjectTitle: string,
+      chapterTitle: string
+    ) => {
+      if (!part.videoUrl || downloadAbortRefs.current[part.id]) return;
+
+      const controller = new AbortController();
+      downloadAbortRefs.current[part.id] = controller;
+      setDownloadErrors((prev) => {
+        const next = { ...prev };
+        delete next[part.id];
+        return next;
+      });
+
+      try {
+        await downloadCompressedVideoForOffline({
+          part,
+          gradeTitle,
+          subjectTitle,
+          chapterTitle,
+          signal: controller.signal,
+          onProgress: (info) => {
+            setDownloadingParts((prev) => ({ ...prev, [part.id]: info }));
+          },
+        });
+        await refreshOfflineList();
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          setDownloadErrors((prev) => ({
+            ...prev,
+            [part.id]: err instanceof Error ? err.message : 'Download failed.',
+          }));
+        }
+      } finally {
+        delete downloadAbortRefs.current[part.id];
+        setDownloadingParts((prev) => {
+          const next = { ...prev };
+          delete next[part.id];
+          return next;
+        });
+      }
+    },
+    [refreshOfflineList]
+  );
+
+  const handleCancelDownload = useCallback((partId: string) => {
+    downloadAbortRefs.current[partId]?.abort();
+  }, []);
+
+  const handleRemoveOfflinePart = useCallback(
+    async (partId: string) => {
+      await deleteOfflineVideo(partId);
+      await refreshOfflineList();
+    },
+    [refreshOfflineList]
+  );
+
   const handleInstallClick = async () => {
     if (canPromptNative) {
       const accepted = await triggerNativeInstall();
@@ -280,7 +346,7 @@ export default function App() {
     }
   };
 
-  const sortedGrades = [...grades].sort((a, b) => a.order - b.order);
+  const sortedGrades = [...grades].sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
 
   const currentGrade =
     route.view !== 'home' && route.view !== 'admin' && route.view !== 'offline'
@@ -290,21 +356,21 @@ export default function App() {
   const currentSubject =
     currentGrade && (route.view === 'subject' || route.view === 'chapter' || route.view === 'part')
       ? [...currentGrade.subjects]
-          .sort((a, b) => a.order - b.order)
+          .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
           .find((s) => s.id === route.subjectId) || null
       : null;
 
   const currentChapter =
     currentSubject && (route.view === 'chapter' || route.view === 'part')
       ? [...currentSubject.chapters]
-          .sort((a, b) => a.order - b.order)
+          .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
           .find((c) => c.id === route.chapterId) || null
       : null;
 
   const currentPart =
     currentChapter && route.view === 'part'
       ? [...currentChapter.parts]
-          .sort((a, b) => a.order - b.order)
+          .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
           .find((p) => p.id === route.partId) || null
       : null;
 
@@ -455,8 +521,42 @@ export default function App() {
             )}
           </nav>
 
-          {/* Zone 3: Single Primary Action */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Zone 3: Student Download Icons & Account Action */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => navigate({ view: 'offline' })}
+              aria-label="Open Offline Downloads"
+              title="Offline Downloads"
+              className={`relative inline-flex items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-semibold active:scale-95 transition-all min-h-[40px] ${
+                route.view === 'offline'
+                  ? 'border-teal-700 bg-teal-50 text-teal-800'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <HardDriveDownload className="h-4 w-4 text-teal-700" />
+              <span className="hidden sm:inline">Downloads</span>
+              {(offlineVideos.length > 0 || Object.keys(downloadingParts).length > 0) && (
+                <span className="font-mono text-[11px] font-bold text-teal-700 tabular-nums">
+                  {Object.keys(downloadingParts).length > 0
+                    ? `(${Object.keys(downloadingParts).length}↓)`
+                    : `(${offlineVideos.length})`}
+                </span>
+              )}
+            </button>
+
+            {!isInstalled && (
+              <button
+                type="button"
+                onClick={handleInstallClick}
+                aria-label="Download Oda Learn App"
+                title="Download App to Home Screen"
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 active:scale-95 transition-all min-h-[40px] md:hidden"
+              >
+                <Download className="h-4 w-4 text-slate-800" />
+              </button>
+            )}
+
             {user ? (
               <div className="flex items-center gap-2">
                 <span className="hidden sm:inline text-xs font-medium text-slate-600 truncate max-w-[140px]">
@@ -476,10 +576,10 @@ export default function App() {
                       setRoute({ view: 'home' });
                     }
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 active:scale-95 transition-all whitespace-nowrap shrink-0 min-h-[40px]"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 active:scale-95 transition-all whitespace-nowrap shrink-0 min-h-[40px]"
                 >
                   <LogOut className="h-3.5 w-3.5" />
-                  Sign Out
+                  <span>Sign Out</span>
                 </button>
               </div>
             ) : (
@@ -489,7 +589,7 @@ export default function App() {
                   setAuthInitialMode('login');
                   setAuthModalOpen(true);
                 }}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-teal-700 px-4 py-2 text-xs font-semibold text-white hover:bg-teal-800 active:scale-95 transition-all whitespace-nowrap shrink-0 min-h-[40px]"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-teal-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-800 active:scale-95 transition-all whitespace-nowrap shrink-0 min-h-[40px]"
               >
                 <User className="h-3.5 w-3.5" />
                 Sign In
@@ -509,10 +609,12 @@ export default function App() {
             onSettingsUpdated={(nextSettings) => {
               setSettings(nextSettings);
               saveCurriculumCache({ settings: nextSettings, grades });
+              syncAllImages(nextSettings, grades);
             }}
             onGradesUpdated={(nextGrades) => {
               setGrades(nextGrades);
               saveCurriculumCache({ settings, grades: nextGrades });
+              syncAllImages(settings, nextGrades);
             }}
             initialFocus={route.focus}
           />
@@ -706,7 +808,7 @@ export default function App() {
             ) : (
               <div className="space-y-6">
                 {[...currentGrade.subjects]
-                  .sort((a, b) => a.order - b.order)
+                  .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
                   .map((subject, idx) => {
                     const totalParts = subject.chapters.reduce(
                       (acc, c) => acc + c.parts.length,
@@ -781,7 +883,7 @@ export default function App() {
             ) : (
               <div className="space-y-6">
                 {[...currentSubject.chapters]
-                  .sort((a, b) => a.order - b.order)
+                  .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
                   .map((chapter, idx) => (
                     <LandscapeCard
                       key={chapter.id}
@@ -837,12 +939,36 @@ export default function App() {
               }
             />
 
-            <div className="border-b border-slate-200 pb-4">
-              <h1 className="font-display text-2xl font-bold text-slate-900 sm:text-3xl">
-                {currentChapter.title}
-              </h1>
-              {currentChapter.subtitle && (
-                <p className="mt-1 text-sm text-slate-600">{currentChapter.subtitle}</p>
+            <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h1 className="font-display text-2xl font-bold text-slate-900 sm:text-3xl">
+                  {currentChapter.title}
+                </h1>
+                {currentChapter.subtitle && (
+                  <p className="mt-1 text-sm text-slate-600">{currentChapter.subtitle}</p>
+                )}
+              </div>
+
+              {currentChapter.parts.some((p) => p.videoUrl && !savedOfflineIds.includes(p.id)) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    currentChapter.parts
+                      .filter((p) => p.videoUrl && !savedOfflineIds.includes(p.id))
+                      .forEach((p) => {
+                        void handleDownloadPart(
+                          p,
+                          currentGrade.title,
+                          currentSubject.title,
+                          currentChapter.title
+                        );
+                      });
+                  }}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 active:scale-95 transition-all min-h-[42px] shrink-0"
+                >
+                  <Download className="h-4 w-4" />
+                  Download All Videos
+                </button>
               )}
             </div>
 
@@ -866,7 +992,7 @@ export default function App() {
             ) : (
               <div className="space-y-6">
                 {[...currentChapter.parts]
-                  .sort((a, b) => a.order - b.order)
+                  .sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
                   .map((part, idx) => (
                     <LandscapeCard
                       key={part.id}
@@ -888,6 +1014,17 @@ export default function App() {
                       isCompleted={completedPartIds.includes(part.id)}
                       isSavedOffline={savedOfflineIds.includes(part.id)}
                       duration={part.duration}
+                      downloadProgress={downloadingParts[part.id] || null}
+                      downloadError={downloadErrors[part.id] || null}
+                      onDownloadClick={() =>
+                        handleDownloadPart(
+                          part,
+                          currentGrade.title,
+                          currentSubject.title,
+                          currentChapter.title
+                        )
+                      }
+                      onCancelDownload={() => handleCancelDownload(part.id)}
                       onClick={() =>
                         navigate({
                           view: 'part',
@@ -956,6 +1093,8 @@ export default function App() {
                 activePart={currentPart}
                 completedPartIds={completedPartIds}
                 savedOfflineIds={savedOfflineIds}
+                downloadingParts={downloadingParts}
+                downloadErrors={downloadErrors}
                 isAdmin={isAdmin}
                 onSelectPart={(part) =>
                   navigate({
@@ -967,7 +1106,16 @@ export default function App() {
                   })
                 }
                 onToggleComplete={handleToggleComplete}
-                onOfflineVideosChanged={refreshOfflineList}
+                onDownloadPart={(part) =>
+                  handleDownloadPart(
+                    part,
+                    currentGrade.title,
+                    currentSubject.title,
+                    currentChapter.title
+                  )
+                }
+                onCancelDownload={handleCancelDownload}
+                onRemoveOfflinePart={handleRemoveOfflinePart}
                 onOpenAdminForPart={() =>
                   navigate({
                     view: 'admin',

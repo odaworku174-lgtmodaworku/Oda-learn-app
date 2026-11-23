@@ -41,6 +41,7 @@ function resolveWritableBaseDir(): string {
 const WRITABLE_BASE_DIR = resolveWritableBaseDir();
 const DATA_DIR = path.join(WRITABLE_BASE_DIR, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'oda-learn.json');
+const DATA_BACKUP_FILE = path.join(DATA_DIR, 'oda-learn.backup.json');
 const UPLOADS_DIR = path.join(WRITABLE_BASE_DIR, 'uploads');
 const AUTH_SECRET = process.env.SESSION_SECRET || 'oda-learn-local-session-secret-2026';
 const DEFAULT_ADMIN_EMAIL = 'odaworku174@gmail.com';
@@ -508,35 +509,115 @@ function makeInitialSeed(): DatabaseSchema {
   };
 }
 
-function readDB(): DatabaseSchema {
-  if (!fs.existsSync(DATA_FILE)) {
-    if (BUNDLED_DATA_FILE !== DATA_FILE && fs.existsSync(BUNDLED_DATA_FILE)) {
-      try {
-        fs.copyFileSync(BUNDLED_DATA_FILE, DATA_FILE);
-      } catch {
-        // Fall through to seed
-      }
-    }
-    if (!fs.existsSync(DATA_FILE)) {
-      const seed = makeInitialSeed();
-      fs.writeFileSync(DATA_FILE, JSON.stringify(seed, null, 2), 'utf8');
-      return seed;
-    }
-  }
+function normalizeDatabase(raw: Partial<DatabaseSchema>): DatabaseSchema {
+  const seed = makeInitialSeed();
+  const settings: SiteSettings = {
+    ...seed.settings,
+    ...(raw.settings || {}),
+    appName: (raw.settings?.appName || seed.settings.appName).trim() || 'Oda Learn',
+    heroMediaType: raw.settings?.heroMediaType === 'video' ? 'video' : 'image',
+  };
+
+  const grades: GradeItem[] = Array.isArray(raw.grades)
+    ? raw.grades.map((g, gIdx) => ({
+        ...g,
+        order: typeof g.order === 'number' ? g.order : gIdx + 1,
+        subjects: Array.isArray(g.subjects)
+          ? g.subjects.map((s, sIdx) => ({
+              ...s,
+              order: typeof s.order === 'number' ? s.order : sIdx + 1,
+              chapters: Array.isArray(s.chapters)
+                ? s.chapters.map((c, cIdx) => ({
+                    ...c,
+                    order: typeof c.order === 'number' ? c.order : cIdx + 1,
+                    parts: Array.isArray(c.parts)
+                      ? c.parts.map((p, pIdx) => ({
+                          ...p,
+                          order: typeof p.order === 'number' ? p.order : pIdx + 1,
+                        }))
+                      : [],
+                  }))
+                : [],
+            }))
+          : [],
+      }))
+    : seed.grades;
+
+  const users: StoredUser[] = Array.isArray(raw.users) && raw.users.length > 0 ? raw.users : seed.users;
+  return { settings, grades, users };
+}
+
+function tryReadJsonFile(filePath: string): DatabaseSchema | null {
+  if (!fs.existsSync(filePath)) return null;
   try {
-    const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    return JSON.parse(raw) as DatabaseSchema;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (!raw.trim()) return null;
+    const parsed = JSON.parse(raw) as Partial<DatabaseSchema>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return normalizeDatabase(parsed);
   } catch {
-    const seed = makeInitialSeed();
-    fs.writeFileSync(DATA_FILE, JSON.stringify(seed, null, 2), 'utf8');
-    return seed;
+    return null;
   }
 }
 
+function readDB(): DatabaseSchema {
+  if (!fs.existsSync(DATA_FILE)) {
+    const fromBackup = tryReadJsonFile(DATA_BACKUP_FILE);
+    if (fromBackup) {
+      writeDB(fromBackup);
+      return fromBackup;
+    }
+    if (BUNDLED_DATA_FILE !== DATA_FILE) {
+      const fromBundled = tryReadJsonFile(BUNDLED_DATA_FILE);
+      if (fromBundled) {
+        writeDB(fromBundled);
+        return fromBundled;
+      }
+    }
+    const seed = makeInitialSeed();
+    writeDB(seed);
+    return seed;
+  }
+
+  const primary = tryReadJsonFile(DATA_FILE);
+  if (primary) {
+    return primary;
+  }
+
+  // Never overwrite admin data silently if DATA_FILE had a syntax/read error: archive it first
+  try {
+    const corruptCopy = path.join(DATA_DIR, `oda-learn.corrupt-${Date.now()}.json`);
+    fs.copyFileSync(DATA_FILE, corruptCopy);
+  } catch {
+    // Ignore backup copy error
+  }
+
+  const fromBackup = tryReadJsonFile(DATA_BACKUP_FILE);
+  if (fromBackup) {
+    return fromBackup;
+  }
+  if (BUNDLED_DATA_FILE !== DATA_FILE) {
+    const fromBundled = tryReadJsonFile(BUNDLED_DATA_FILE);
+    if (fromBundled) {
+      return fromBundled;
+    }
+  }
+  return makeInitialSeed();
+}
+
 function writeDB(db: DatabaseSchema): void {
+  const normalized = normalizeDatabase(db);
+  const serialized = JSON.stringify(normalized, null, 2);
   const tmpFile = `${DATA_FILE}.tmp`;
-  fs.writeFileSync(tmpFile, JSON.stringify(db, null, 2), 'utf8');
+  fs.writeFileSync(tmpFile, serialized, 'utf8');
   fs.renameSync(tmpFile, DATA_FILE);
+  try {
+    const tmpBackup = `${DATA_BACKUP_FILE}.tmp`;
+    fs.writeFileSync(tmpBackup, serialized, 'utf8');
+    fs.renameSync(tmpBackup, DATA_BACKUP_FILE);
+  } catch {
+    // Non-fatal backup write failure
+  }
 }
 
 function sanitizeUser(user: StoredUser): UserProfile {
@@ -712,13 +793,14 @@ export async function createExpressApp(httpServer?: http.Server) {
     express.json({ limit: '5mb' })(req, res, next);
   });
 
-  // Public curriculum endpoint
+  // Public curriculum endpoint (never served from stale HTTP cache)
   app.get('/api/curriculum', (_req, res) => {
     const db = readDB();
     const payload: CurriculumData = {
       settings: db.settings,
-      grades: [...db.grades].sort((a, b) => a.order - b.order),
+      grades: [...db.grades].sort((a, b) => (a.order ?? 999) - (b.order ?? 999)),
     };
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.json(payload);
   });
 
@@ -1067,6 +1149,35 @@ export async function createExpressApp(httpServer?: http.Server) {
     };
     writeDB(db);
     res.json({ settings: db.settings });
+  });
+
+  // Admin: Export & Import Full Curriculum Backup (preserves all admin edits safely)
+  app.get('/api/admin/export', requireAdmin, (_req, res) => {
+    const db = readDB();
+    res.json({
+      exportedAt: new Date().toISOString(),
+      settings: db.settings,
+      grades: db.grades,
+    });
+  });
+
+  app.post('/api/admin/import', requireAdmin, (req, res) => {
+    const incoming = req.body as Partial<CurriculumData>;
+    if (!incoming || !Array.isArray(incoming.grades) || !incoming.settings) {
+      res.status(400).json({ error: 'Invalid backup file. Must contain settings and grades.' });
+      return;
+    }
+    const db = readDB();
+    const normalized = normalizeDatabase({
+      settings: incoming.settings,
+      grades: incoming.grades,
+      users: db.users,
+    });
+    writeDB(normalized);
+    res.json({
+      settings: normalized.settings,
+      grades: normalized.grades,
+    });
   });
 
   // Admin: Grades CRUD

@@ -55,7 +55,7 @@ async function apiRequest<T>(url: string, options: RequestInit = {}): Promise<T>
 }
 
 export async function fetchCurriculum(): Promise<CurriculumData> {
-  return apiRequest<CurriculumData>('/api/curriculum');
+  return apiRequest<CurriculumData>('/api/curriculum', { cache: 'no-store' });
 }
 
 export async function getCurrentUser(): Promise<UserProfile | null> {
@@ -175,6 +175,19 @@ export async function updateSiteSettings(settings: Partial<SiteSettings>): Promi
     body: JSON.stringify(settings),
   });
   return res.settings;
+}
+
+export async function exportCurriculumBackup(): Promise<CurriculumData & { exportedAt: string }> {
+  return apiRequest<CurriculumData & { exportedAt: string }>('/api/admin/export', {
+    cache: 'no-store',
+  });
+}
+
+export async function importCurriculumBackup(payload: CurriculumData): Promise<CurriculumData> {
+  return apiRequest<CurriculumData>('/api/admin/import', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function createGrade(payload: Partial<GradeItem>): Promise<GradeItem[]> {

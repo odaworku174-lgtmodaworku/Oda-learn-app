@@ -14,8 +14,6 @@ import {
 } from 'lucide-react';
 import { getVideoDownloadInfo } from '../lib/api';
 import {
-  deleteOfflineVideo,
-  downloadCompressedVideoForOffline,
   formatMB,
   formatTimeLeft,
   getOfflineVideoRecord,
@@ -32,44 +30,48 @@ interface VideoPlayerViewProps {
   activePart: VideoPartItem;
   completedPartIds: string[];
   savedOfflineIds: string[];
+  downloadingParts: Record<string, DownloadProgressInfo>;
+  downloadErrors: Record<string, string>;
   isAdmin: boolean;
   onSelectPart: (part: VideoPartItem) => void;
   onToggleComplete: (partId: string) => void;
-  onOfflineVideosChanged: () => void;
+  onDownloadPart: (part: VideoPartItem) => void;
+  onCancelDownload: (partId: string) => void;
+  onRemoveOfflinePart: (partId: string) => Promise<void>;
   onOpenAdminForPart?: () => void;
 }
 
 export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
-  gradeTitle,
-  subjectTitle,
   chapter,
   activePart,
   completedPartIds,
   savedOfflineIds,
+  downloadingParts,
+  downloadErrors,
   isAdmin,
   onSelectPart,
   onToggleComplete,
-  onOfflineVideosChanged,
+  onDownloadPart,
+  onCancelDownload,
+  onRemoveOfflinePart,
   onOpenAdminForPart,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [playbackRate, setPlaybackRate] = useState(1);
   const [offlineRecord, setOfflineRecord] = useState<OfflineVideoRecord | null>(null);
   const [offlineBlobUrl, setOfflineBlobUrl] = useState<string | null>(null);
-
   const [estimatedMB, setEstimatedMB] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressInfo | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
-  const sortedParts = [...chapter.parts].sort((a, b) => a.order - b.order);
+  const sortedParts = [...chapter.parts].sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
   const currentIdx = sortedParts.findIndex((p) => p.id === activePart.id);
   const prevPart = currentIdx > 0 ? sortedParts[currentIdx - 1] : null;
   const nextPart =
     currentIdx >= 0 && currentIdx < sortedParts.length - 1 ? sortedParts[currentIdx + 1] : null;
   const isCompleted = completedPartIds.includes(activePart.id);
+  const isSavedOffline = savedOfflineIds.includes(activePart.id);
+  const activeDownloadProgress = downloadingParts[activePart.id] || null;
+  const activeDownloadError = downloadErrors[activePart.id] || null;
 
   // Load saved offline video Blob from IndexedDB if available
   useEffect(() => {
@@ -77,7 +79,6 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     let createdUrl: string | null = null;
     setOfflineRecord(null);
     setOfflineBlobUrl(null);
-    setDownloadError(null);
     setEstimatedMB(null);
 
     getOfflineVideoRecord(activePart.id)
@@ -107,7 +108,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
       active = false;
       if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
-  }, [activePart.id, activePart.videoUrl]);
+  }, [activePart.id, activePart.videoUrl, isSavedOffline]);
 
   const handleSpeedChange = (rate: number) => {
     setPlaybackRate(rate);
@@ -116,53 +117,11 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
     }
   };
 
-  const handleDownloadCompressed = async () => {
-    if (!activePart.videoUrl || downloading) return;
-    setDownloadError(null);
-    setDownloading(true);
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    try {
-      const saved = await downloadCompressedVideoForOffline({
-        part: activePart,
-        gradeTitle,
-        subjectTitle,
-        chapterTitle: chapter.title,
-        onProgress: setDownloadProgress,
-        signal: controller.signal,
-      });
-
-      if (saved.blob) {
-        const nextUrl = URL.createObjectURL(saved.blob);
-        setOfflineRecord(saved);
-        setOfflineBlobUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return nextUrl;
-        });
-      }
-      onOfflineVideosChanged();
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        setDownloadError(err instanceof Error ? err.message : 'Download failed.');
-      }
-    } finally {
-      setDownloading(false);
-      setDownloadProgress(null);
-      abortControllerRef.current = null;
-    }
-  };
-
-  const handleCancelDownload = () => {
-    abortControllerRef.current?.abort();
-  };
-
   const handleRemoveOffline = async () => {
-    await deleteOfflineVideo(activePart.id);
+    await onRemoveOfflinePart(activePart.id);
     if (offlineBlobUrl) URL.revokeObjectURL(offlineBlobUrl);
     setOfflineRecord(null);
     setOfflineBlobUrl(null);
-    onOfflineVideosChanged();
   };
 
   const activePlaybackSrc = offlineBlobUrl || activePart.videoUrl;
@@ -270,6 +229,17 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                 </div>
               )}
 
+              {activePart.videoUrl && !offlineRecord && !activeDownloadProgress && (
+                <button
+                  type="button"
+                  onClick={() => onDownloadPart(activePart)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 active:scale-[0.98] transition-all min-h-[44px]"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Download</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => onToggleComplete(activePart.id)}
@@ -322,20 +292,20 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                     Remove Download
                   </button>
                 </div>
-              ) : downloading && downloadProgress ? (
+              ) : activeDownloadProgress ? (
                 <div className="space-y-2.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
                       <Loader2 className="h-4 w-4 animate-spin text-teal-700" />
                       <span>
-                        {downloadProgress.phase === 'preparing'
+                        {activeDownloadProgress.phase === 'preparing'
                           ? 'Compressing video for fast mobile download...'
                           : 'Downloading Compressed Video'}
                       </span>
                     </div>
                     <button
                       type="button"
-                      onClick={handleCancelDownload}
+                      onClick={() => onCancelDownload(activePart.id)}
                       className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
                     >
                       <X className="h-3.5 w-3.5" />
@@ -346,13 +316,13 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                   <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
                     <div
                       className={`h-full transition-all duration-150 ${
-                        downloadProgress.percent === null
+                        activeDownloadProgress.percent === null
                           ? 'w-1/3 animate-pulse bg-teal-600'
                           : 'bg-teal-700'
                       }`}
                       style={
-                        downloadProgress.percent !== null
-                          ? { width: `${downloadProgress.percent}%` }
+                        activeDownloadProgress.percent !== null
+                          ? { width: `${activeDownloadProgress.percent}%` }
                           : undefined
                       }
                     />
@@ -360,20 +330,20 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
 
                   <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-xs text-slate-700 tabular-nums">
                     <span>
-                      {formatMB(downloadProgress.receivedBytes)}
-                      {downloadProgress.totalBytes
-                        ? ` / ${formatMB(downloadProgress.totalBytes)}`
+                      {formatMB(activeDownloadProgress.receivedBytes)}
+                      {activeDownloadProgress.totalBytes
+                        ? ` / ${formatMB(activeDownloadProgress.totalBytes)}`
                         : ''}
-                      {downloadProgress.percent !== null
-                        ? ` (${downloadProgress.percent}%)`
+                      {activeDownloadProgress.percent !== null
+                        ? ` (${activeDownloadProgress.percent}%)`
                         : ''}
                     </span>
                     <span>
-                      {downloadProgress.phase === 'preparing'
+                      {activeDownloadProgress.phase === 'preparing'
                         ? 'Preparing smaller file...'
-                        : `${formatTimeLeft(downloadProgress.secondsLeft)}${
-                            downloadProgress.speedBytesPerSec > 0
-                              ? ` · ${(downloadProgress.speedBytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`
+                        : `${formatTimeLeft(activeDownloadProgress.secondsLeft)}${
+                            activeDownloadProgress.speedBytesPerSec > 0
+                              ? ` · ${(activeDownloadProgress.speedBytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`
                               : ''
                           }`}
                     </span>
@@ -392,7 +362,7 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                   </div>
                   <button
                     type="button"
-                    onClick={handleDownloadCompressed}
+                    onClick={() => onDownloadPart(activePart)}
                     className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-semibold text-white hover:bg-slate-800 active:scale-[0.98] transition-all min-h-[44px]"
                   >
                     <Download className="h-4 w-4" />
@@ -401,8 +371,8 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                 </div>
               )}
 
-              {downloadError && (
-                <p className="mt-2 text-xs font-medium text-red-600">{downloadError}</p>
+              {activeDownloadError && (
+                <p className="mt-2 text-xs font-medium text-red-600">{activeDownloadError}</p>
               )}
             </div>
           )}
@@ -460,6 +430,10 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
                 isCompleted={completedPartIds.includes(part.id)}
                 isSavedOffline={savedOfflineIds.includes(part.id)}
                 duration={part.duration}
+                downloadProgress={downloadingParts[part.id] || null}
+                downloadError={downloadErrors[part.id] || null}
+                onDownloadClick={() => onDownloadPart(part)}
+                onCancelDownload={() => onCancelDownload(part.id)}
                 onClick={() => {
                   onSelectPart(part);
                   window.scrollTo({ top: 0, behavior: 'smooth' });

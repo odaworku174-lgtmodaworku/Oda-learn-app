@@ -1,15 +1,18 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
   ChevronRight,
+  Download,
   Film,
   FolderOpen,
   Image as ImageIcon,
   Layers,
   Plus,
   Save,
+  ShieldCheck,
   Sparkles,
   Trash2,
+  Upload,
 } from 'lucide-react';
 import {
   createChapter,
@@ -21,6 +24,8 @@ import {
   deleteMediaItem,
   deletePart,
   deleteSubject,
+  exportCurriculumBackup,
+  importCurriculumBackup,
   listMediaLibrary,
   updateChapter,
   updateGrade,
@@ -29,6 +34,7 @@ import {
   updateSubject,
 } from '../lib/api';
 import type {
+  CurriculumData,
   GradeItem,
   SiteSettings,
   UploadedMediaItem,
@@ -101,6 +107,11 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
   const [mediaItems, setMediaItems] = useState<UploadedMediaItem[]>([]);
   const [loadingMedia, setLoadingMedia] = useState(false);
 
+  // Backup / Restore state
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+
   useEffect(() => {
     setHeroForm(settings);
   }, [settings]);
@@ -112,24 +123,37 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
     if (initialFocus?.chapterId) setSelectedChapterId(initialFocus.chapterId);
   }, [initialFocus]);
 
-  const sortedGrades = [...grades].sort((a, b) => a.order - b.order);
+  const sortedGrades = [...grades].sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
   const selectedGrade = sortedGrades.find((g) => g.id === selectedGradeId) || null;
   const sortedSubjects = selectedGrade
-    ? [...selectedGrade.subjects].sort((a, b) => a.order - b.order)
+    ? [...selectedGrade.subjects].sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
     : [];
   const selectedSubject = sortedSubjects.find((s) => s.id === selectedSubjectId) || null;
   const sortedChapters = selectedSubject
-    ? [...selectedSubject.chapters].sort((a, b) => a.order - b.order)
+    ? [...selectedSubject.chapters].sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
     : [];
   const selectedChapter = sortedChapters.find((c) => c.id === selectedChapterId) || null;
   const sortedParts = selectedChapter
-    ? [...selectedChapter.parts].sort((a, b) => a.order - b.order)
+    ? [...selectedChapter.parts].sort((a, b) => (a.order ?? 999) - (b.order ?? 999))
     : [];
 
   const notifyStatus = (msg: string) => {
     setCurriculumError(null);
     setCurriculumStatus(msg);
     setTimeout(() => setCurriculumStatus(null), 2600);
+  };
+
+  const persistHeroPatch = async (nextForm: SiteSettings) => {
+    setHeroForm(nextForm);
+    setHeroError(null);
+    try {
+      const updated = await updateSiteSettings(nextForm);
+      onSettingsUpdated(updated);
+      setHeroSaved(true);
+      setTimeout(() => setHeroSaved(false), 2600);
+    } catch (err) {
+      setHeroError(err instanceof Error ? err.message : 'Failed to save settings.');
+    }
   };
 
   const handleSaveHero = async (e: React.FormEvent) => {
@@ -146,6 +170,47 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
       setHeroError(err instanceof Error ? err.message : 'Failed to save settings.');
     } finally {
       setSavingHero(false);
+    }
+  };
+
+  const handleExportBackup = async () => {
+    setBackupError(null);
+    setBackupStatus(null);
+    try {
+      const payload = await exportCurriculumBackup();
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `oda-learn-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setBackupStatus('Backup downloaded safely.');
+      setTimeout(() => setBackupStatus(null), 3000);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : 'Failed to export backup.');
+    }
+  };
+
+  const handleImportBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBackupError(null);
+    setBackupStatus(null);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as CurriculumData;
+      const restored = await importCurriculumBackup(parsed);
+      onSettingsUpdated(restored.settings);
+      onGradesUpdated(restored.grades);
+      setBackupStatus('Backup restored and protected.');
+      setTimeout(() => setBackupStatus(null), 3200);
+    } catch (err) {
+      setBackupError(err instanceof Error ? err.message : 'Invalid backup JSON file.');
+    } finally {
+      if (backupInputRef.current) backupInputRef.current.value = '';
     }
   };
 
@@ -219,6 +284,52 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
         </div>
       </div>
 
+      {/* Admin Data Protection & Backup Bar */}
+      <div className="flex flex-col gap-3 rounded-2xl border border-teal-200 bg-teal-50/60 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          <ShieldCheck className="h-5 w-5 text-teal-700 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs font-bold text-slate-900">
+              Admin Edits Auto-Saved &amp; Protected
+            </p>
+            <p className="text-xs text-slate-600">
+              All gallery uploads and edits save immediately with automatic server backup. Export a JSON copy anytime for extra safety.
+            </p>
+            {backupStatus && (
+              <p className="mt-1 text-xs font-semibold text-emerald-700">{backupStatus}</p>
+            )}
+            {backupError && (
+              <p className="mt-1 text-xs font-semibold text-red-600">{backupError}</p>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleExportBackup}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 transition-colors min-h-[38px]"
+          >
+            <Download className="h-3.5 w-3.5 text-teal-700" />
+            Export Backup
+          </button>
+          <input
+            ref={backupInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={handleImportBackup}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => backupInputRef.current?.click()}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 transition-colors min-h-[38px]"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            Restore Backup
+          </button>
+        </div>
+      </div>
+
       {/* TAB 1: OPENING APPEARANCE & HERO HEAD */}
       {activeTab === 'appearance' && (
         <form onSubmit={handleSaveHero} className="space-y-8">
@@ -283,7 +394,7 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
               <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
                 <button
                   type="button"
-                  onClick={() => setHeroForm({ ...heroForm, heroMediaType: 'image' })}
+                  onClick={() => persistHeroPatch({ ...heroForm, heroMediaType: 'image' })}
                   className={`inline-flex items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-colors ${
                     heroForm.heroMediaType === 'image'
                       ? 'bg-white text-slate-900 shadow-sm'
@@ -295,7 +406,7 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setHeroForm({ ...heroForm, heroMediaType: 'video' })}
+                  onClick={() => persistHeroPatch({ ...heroForm, heroMediaType: 'video' })}
                   className={`inline-flex items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-colors ${
                     heroForm.heroMediaType === 'video'
                       ? 'bg-white text-slate-900 shadow-sm'
@@ -317,7 +428,7 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
                 previewKind={heroForm.heroMediaType}
                 value={heroForm.heroMediaUrl}
                 onChange={(url, detectedKind) =>
-                  setHeroForm({
+                  persistHeroPatch({
                     ...heroForm,
                     heroMediaUrl: url,
                     heroMediaType: detectedKind || heroForm.heroMediaType,
@@ -330,7 +441,7 @@ export const AdminStudio: React.FC<AdminStudioProps> = ({
                   type="checkbox"
                   checked={heroForm.showOpeningSplash}
                   onChange={(e) =>
-                    setHeroForm({ ...heroForm, showOpeningSplash: e.target.checked })
+                    persistHeroPatch({ ...heroForm, showOpeningSplash: e.target.checked })
                   }
                   className="mt-0.5 h-4 w-4 rounded border-slate-300 text-teal-700 focus:ring-teal-700"
                 />
@@ -1054,6 +1165,12 @@ const GradeEditorCard: React.FC<{
   const [imageUrl, setImageUrl] = useState(grade.imageUrl);
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    setTitle(grade.title);
+    setSubtitle(grade.subtitle);
+    setImageUrl(grade.imageUrl);
+  }, [grade.id, grade.title, grade.subtitle, grade.imageUrl]);
+
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1105,7 +1222,14 @@ const GradeEditorCard: React.FC<{
         label={`16:9 Landscape Image for ${title || grade.title}`}
         accept="image"
         value={imageUrl}
-        onChange={(url) => setImageUrl(url)}
+        onChange={async (url) => {
+          setImageUrl(url);
+          if (url.startsWith('/uploads/') || url.startsWith('/images/')) {
+            setSaving(true);
+            await onSave({ title, subtitle, imageUrl: url });
+            setSaving(false);
+          }
+        }}
       />
 
       <div className="flex justify-end">
@@ -1137,6 +1261,12 @@ const SubjectEditorCard: React.FC<{
   const [subtitle, setSubtitle] = useState(subject.subtitle);
   const [imageUrl, setImageUrl] = useState(subject.imageUrl);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setTitle(subject.title);
+    setSubtitle(subject.subtitle);
+    setImageUrl(subject.imageUrl);
+  }, [subject.id, subject.title, subject.subtitle, subject.imageUrl]);
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
@@ -1188,7 +1318,14 @@ const SubjectEditorCard: React.FC<{
         label={`16:9 Landscape Image for ${title || subject.title}`}
         accept="image"
         value={imageUrl}
-        onChange={(url) => setImageUrl(url)}
+        onChange={async (url) => {
+          setImageUrl(url);
+          if (url.startsWith('/uploads/') || url.startsWith('/images/')) {
+            setSaving(true);
+            await onSave({ title, subtitle, imageUrl: url });
+            setSaving(false);
+          }
+        }}
       />
 
       <div className="flex justify-end">
@@ -1221,6 +1358,12 @@ const ChapterEditorCard: React.FC<{
   const [subtitle, setSubtitle] = useState(chapter.subtitle);
   const [imageUrl, setImageUrl] = useState(chapter.imageUrl);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setTitle(chapter.title);
+    setSubtitle(chapter.subtitle);
+    setImageUrl(chapter.imageUrl);
+  }, [chapter.id, chapter.title, chapter.subtitle, chapter.imageUrl]);
 
   return (
     <div
@@ -1279,7 +1422,14 @@ const ChapterEditorCard: React.FC<{
         label={`16:9 Landscape Image for ${title || chapter.title}`}
         accept="image"
         value={imageUrl}
-        onChange={(url) => setImageUrl(url)}
+        onChange={async (url) => {
+          setImageUrl(url);
+          if (url.startsWith('/uploads/') || url.startsWith('/images/')) {
+            setSaving(true);
+            await onSave({ title, subtitle, imageUrl: url });
+            setSaving(false);
+          }
+        }}
       />
 
       <div className="flex justify-end">
@@ -1312,6 +1462,14 @@ const PartEditorCard: React.FC<{
   const [thumbnailUrl, setThumbnailUrl] = useState(part.thumbnailUrl);
   const [videoUrl, setVideoUrl] = useState(part.videoUrl);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setTitle(part.title);
+    setDescription(part.description);
+    setDuration(part.duration);
+    setThumbnailUrl(part.thumbnailUrl);
+    setVideoUrl(part.videoUrl);
+  }, [part.id, part.title, part.description, part.duration, part.thumbnailUrl, part.videoUrl]);
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4">
@@ -1357,14 +1515,28 @@ const PartEditorCard: React.FC<{
           label="16:9 Part Landscape Thumbnail"
           accept="image"
           value={thumbnailUrl}
-          onChange={(url) => setThumbnailUrl(url)}
+          onChange={async (url) => {
+            setThumbnailUrl(url);
+            if (url.startsWith('/uploads/') || url.startsWith('/images/')) {
+              setSaving(true);
+              await onSave({ title, description, duration, thumbnailUrl: url, videoUrl });
+              setSaving(false);
+            }
+          }}
         />
         <GalleryUploadControl
           label="Tutorial Video (Upload from Gallery)"
           accept="video"
           previewKind="video"
           value={videoUrl}
-          onChange={(url) => setVideoUrl(url)}
+          onChange={async (url) => {
+            setVideoUrl(url);
+            if (url.startsWith('/uploads/')) {
+              setSaving(true);
+              await onSave({ title, description, duration, thumbnailUrl, videoUrl: url });
+              setSaving(false);
+            }
+          }}
         />
       </div>
 
